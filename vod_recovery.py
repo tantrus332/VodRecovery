@@ -36,7 +36,7 @@ logging.getLogger('asyncio').setLevel(logging.CRITICAL)
 logging.getLogger('aiohttp').setLevel(logging.CRITICAL)
 
 
-CURRENT_VERSION = "1.5.15"
+CURRENT_VERSION = "1.5.16"
 SUPPORTED_FORMATS = [".mp4", ".mkv", ".mov", ".avi", ".ts"]
 RESOLUTIONS = ["chunked", "2160p60", "2160p30", "2160p20", "1440p60", "1440p30", "1440p20", "1080p60", "1080p30", "1080p20", "720p60", "720p30", "720p20", "480p60", "480p30", "360p60", "360p30", "160p60", "160p30"]
 
@@ -44,7 +44,7 @@ CLI_MODE = False
 CLI_DOWNLOAD_FROM_START = False
 
 
-if sys.platform == 'win32':
+if sys.platform == 'win32' and sys.version_info < (3, 12):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     except Exception:
@@ -403,20 +403,20 @@ def print_get_twitch_clip_url_menu():
 
 
 def print_get_twitch_url_or_name_menu():
-    user_input = input("Enter Stream URL or streamer name: ").strip(" \"'")
-    
-    if "twitch.tv" in user_input:
-        return user_input
-    
-    if user_input and not user_input.startswith("http"):
-        streamer_name = user_input.lstrip("@")
-        return f"https://www.twitch.tv/{streamer_name}"
-    
-    if user_input.startswith("http"):
-        return user_input
-    
-    print("\n✖  Invalid input! Please try again:\n")
-    return print_get_twitch_url_or_name_menu()
+    while True:
+        user_input = input("Enter Stream URL or streamer name: ").strip(" \"'")
+        
+        if "twitch.tv" in user_input:
+            return user_input
+        
+        if user_input and not user_input.startswith("http"):
+            streamer_name = user_input.lstrip("@")
+            return f"https://www.twitch.tv/{streamer_name}"
+        
+        if user_input.startswith("http"):
+            return user_input
+        
+        print("\n✖  Invalid input! Please try again:\n")
 
 
 def get_twitch_or_tracker_url():
@@ -671,17 +671,17 @@ def get_datetime_from_vod_vod(url):
         elif "sullygnome.com" in url:
             streamer_name, stream_id = parse_sullygnome_url(url)
         else:
-            return None
+            return None, None
         
         response = requests.get(f"https://api.vodvod.top/channels/@{streamer_name}", headers=return_user_agent(), timeout=15)
         
         if response.status_code != 200:
-            return None
+            return None, None
             
         data = response.json()
         
         if not data or not isinstance(data, list):
-            return None
+            return None, None
             
         for item in data:
             try:
@@ -881,7 +881,6 @@ def fetch_recent_streams_api(streamer_name, max_streams=100):
                 streams.append(stream)
                 
             except Exception as e:
-                pass
                 continue
         
         return streams
@@ -1209,8 +1208,8 @@ def sanitize_filename(filename, restricted=False):
 def read_config_file(config_file):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(current_dir, "config", f"{config_file}.json")
-    with open(config_path, encoding="utf-8") as config_file:
-        config = json.load(config_file)
+    with open(config_path, encoding="utf-8") as f:
+        config = json.load(f)
     return config
 
 
@@ -1259,7 +1258,7 @@ def write_m3u8_to_file(m3u8_link, destination_path, max_retries=5):
             if response.status_code == 200:
                 with open(destination_path, "w", encoding="utf-8") as m3u8_file:
                     m3u8_file.write(response.text)
-                return m3u8_file
+                return destination_path
             elif response.status_code in (403, 404, 410):
                 vod_id = parse_video_id_from_m3u8_link(m3u8_link)
                 generated_path = os.path.join(get_default_directory(), f"vod_{vod_id}_generated.m3u8")
@@ -1268,19 +1267,14 @@ def write_m3u8_to_file(m3u8_link, destination_path, max_retries=5):
                         content = gen_file.read()
                     with open(destination_path, "w", encoding="utf-8") as m3u8_file:
                         m3u8_file.write(content)
-                    return m3u8_file
+                    return destination_path
                 base_url = m3u8_link.replace("index-dvr.m3u8", "")
                 generated_m3u8 = generate_m3u8_from_segments(base_url)
                 if generated_m3u8:
-                    absolute_m3u8 = generated_m3u8.replace("\n0.ts", f"\n{base_url}0.ts")
-                    for i in range(1, 100000):
-                        if f"\n{i}.ts" in absolute_m3u8:
-                            absolute_m3u8 = absolute_m3u8.replace(f"\n{i}.ts", f"\n{base_url}{i}.ts")
-                        else:
-                            break
+                    absolute_m3u8 = make_m3u8_segments_absolute(generated_m3u8, base_url)
                     with open(destination_path, "w", encoding="utf-8") as m3u8_file:
                         m3u8_file.write(absolute_m3u8)
-                    return m3u8_file
+                    return destination_path
         except Exception:
             pass
         attempt += 1
@@ -1330,10 +1324,14 @@ def get_script_directory():
     return os.path.dirname(os.path.realpath(__file__))
 
 
+_cached_user_agents = None
+
 def return_user_agent():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    user_agents = read_text_file(os.path.join(script_dir, "lib", "user_agents.txt"))
-    header = {"user-agent": random.choice(user_agents)}
+    global _cached_user_agents
+    if _cached_user_agents is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        _cached_user_agents = read_text_file(os.path.join(script_dir, "lib", "user_agents.txt"))
+    header = {"user-agent": random.choice(_cached_user_agents)}
     return header
 
 
@@ -1348,7 +1346,7 @@ def calculate_epoch_timestamp(timestamp, seconds):
 def calculate_days_since_broadcast(start_timestamp):
     if start_timestamp is None:
         return 0
-    vod_age = datetime.today() - datetime.strptime(start_timestamp, "%Y-%m-%d %H:%M:%S")
+    vod_age = datetime.now(timezone.utc).replace(tzinfo=None) - datetime.strptime(start_timestamp, "%Y-%m-%d %H:%M:%S")
     return max(vod_age.days, 0)
 
 
@@ -1620,6 +1618,7 @@ def remove_chars_from_ordinal_numbers(datetime_string):
     for exclude_string in ordinal_numbers:
         if exclude_string in datetime_string:
             return datetime_string.replace(datetime_string.split(" ")[1], datetime_string.split(" ")[1][:-len(exclude_string)])
+    return datetime_string
 
 
 def generate_website_links(streamer_name, video_id, tracker_url=None):
@@ -1661,7 +1660,9 @@ def convert_url(url, target):
 
 def extract_offset(clip_url):
     clip_offset = re.search(r"(?:-offset|-index)-(\d+)", clip_url)
-    return clip_offset.group(1)
+    if clip_offset:
+        return clip_offset.group(1)
+    return "0"
 
 
 def get_clip_format(video_id, offsets):
@@ -1838,7 +1839,8 @@ async def get_vod_urls(streamer_name, video_id, start_timestamp):
     progress_printed = False
 
     try:
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(limit=100, force_close=True)
+        async with aiohttp.ClientSession(connector=connector) as session:
             tasks = [fetch_status(session, url) for url in m3u8_link_list]
             task_objects = [asyncio.create_task(task) for task in tasks]
 
@@ -2076,7 +2078,8 @@ def check_seleniumbase_version():
 
 def check_folder_write_permission():
     try:
-        test_file = ".vodrecovery_write_test"
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        test_file = os.path.join(script_dir, ".vodrecovery_write_test")
         with open(test_file, "w") as f:
             f.write("test")
         os.remove(test_file)
@@ -2092,7 +2095,7 @@ def is_permission_error(e):
     return ("access is denied" in err_str or 
             "permission" in err_str or 
             "winerror 5" in err_str or
-            b"downloaded_files" in str(e).encode() if isinstance(e, Exception) else False)
+            (isinstance(e, Exception) and b"downloaded_files" in str(e).encode()))
 
 
 def check_selenium_folder_access():
@@ -2304,7 +2307,7 @@ def selenium_get_latest_streams_from_twitchtracker(streamer_name):
                             duration = duration_minutes // 60 + (duration_minutes % 60 / 60)
                         except Exception:
                             duration = 0
-                    current_utc = datetime.utcnow()
+                    current_utc = datetime.now(timezone.utc).replace(tzinfo=None)
                     old_utc = current_utc - timedelta(days=60)
                     if dt_utc_obj < old_utc:
                         continue
@@ -2822,7 +2825,7 @@ def mark_invalid_segments_in_playlist(m3u8_link):
 
 def return_m3u8_duration(m3u8_link):
     total_duration = 0
-    file_contents = requests.get(m3u8_link, stream=True, timeout=30).text.splitlines()
+    file_contents = requests.get(m3u8_link, timeout=30).text.splitlines()
     for line in file_contents:
         if line.startswith("#EXTINF:"):
             segment_duration = float(line.split(":")[1].split(",")[0])
@@ -3022,11 +3025,7 @@ async def validate_playlist_segments(segments):
 
 def run_vod_recovery(streamer_name, video_id, timestamp):
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        vod_url = loop.run_until_complete(get_vod_urls(streamer_name, video_id, timestamp))
-        loop.close()
-        return vod_url
+        return asyncio.run(get_vod_urls(streamer_name, video_id, timestamp))
     except Exception as e:
         print(f"\n✖  Error during VOD recovery: {str(e)}")
         return None
@@ -3112,7 +3111,7 @@ def vod_recover(streamer_name, video_id, timestamp, tracker_url=None):
                     return vod_url
 
             if not vod_url and tracker_url:
-                print("\033[91m \n✖  Unable to recover the video! \033[0m")
+                print("\033[91m \n✖  Video not found! \033[0m")
                 input("\nPress Enter to continue...")
                 return_to_main_menu()
             else:
@@ -3422,14 +3421,14 @@ def download_clips(directory, streamer_name, video_id):
     mp4_links = [link for link in file_contents if os.path.basename(link).endswith(".mp4")]
     for link in mp4_links:
         try:
-            response = requests.get(link, stream=False, timeout=30)
+            response = requests.get(link, stream=True, timeout=30)
             if response.status_code == 200:
                 offset = extract_offset(response.url)
                 file_name = f"{streamer_name.title()}_{video_id}_{offset}{get_default_video_format()}"
                 try:
                     with open(os.path.join(download_directory, file_name), "wb") as x:
+                        shutil.copyfileobj(response.raw, x)
                         print(f"Downloaded: {file_name}")
-                        x.write(response.content)
                 except ValueError:
                     print(f"Failed to download... {response.url}")
             else:
@@ -3450,12 +3449,12 @@ def download_clips_gql(directory, streamer_name, video_id, slugs, prefetched_url
             if not url:
                 print(f"Skipping {slug} (could not get URL)")
                 continue
-            response = requests.get(url, stream=False, timeout=60)
+            response = requests.get(url, stream=True, timeout=60)
             if response.status_code == 200:
                 file_name = f"{streamer_name.title()}_{video_id}_{i:04d}_{slug[:40]}{get_default_video_format()}"
                 with open(os.path.join(download_directory, file_name), "wb") as x:
+                    shutil.copyfileobj(response.raw, x)
                     print(f"Downloaded: {file_name}")
-                    x.write(response.content)
             else:
                 print(f"Failed to download {slug}: HTTP {response.status_code}")
         except Exception:
@@ -3464,33 +3463,47 @@ def download_clips_gql(directory, streamer_name, video_id, slugs, prefetched_url
     print(f"\n\033[92m\u2713 Clips downloaded to {download_directory}\033[0m")
 
 
+_cached_ffmpeg_path = None
+
 def get_ffmpeg_path():
+    global _cached_ffmpeg_path
+    if _cached_ffmpeg_path is not None:
+        return _cached_ffmpeg_path
     try:
         try:
 
             if subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True).returncode == 0:
-                return "ffmpeg"
+                _cached_ffmpeg_path = "ffmpeg"
+                return _cached_ffmpeg_path
         except Exception:
             pass 
         
         if os.path.exists(ffdl.ffmpeg_path):
-            return ffdl.ffmpeg_path
+            _cached_ffmpeg_path = ffdl.ffmpeg_path
+            return _cached_ffmpeg_path
 
         raise Exception
     except Exception:
         sys.exit("FFmpeg not found! Please install FFmpeg correctly and try again.")
 
 
+_cached_ffprobe_path = None
+
 def get_ffprobe_path():
+    global _cached_ffprobe_path
+    if _cached_ffprobe_path is not None:
+        return _cached_ffprobe_path
     try:
         try:
             if subprocess.run(["ffprobe", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True).returncode == 0:
-                return "ffprobe"
+                _cached_ffprobe_path = "ffprobe"
+                return _cached_ffprobe_path
         except Exception:
             pass
 
         if os.path.exists(ffdl.ffprobe_path):
-            return ffdl.ffprobe_path
+            _cached_ffprobe_path = ffdl.ffprobe_path
+            return _cached_ffprobe_path
 
         raise Exception
     except Exception:
@@ -4456,34 +4469,41 @@ def print_confirm_download_menu():
         menu_options.append("3) Play with VLC")
     menu_options.append(f"{3 if not vlc_location else 4}) Return")
 
-    print("\n".join(menu_options))
-    try:
-        return int(input("\nChoose an option: "))
-    except ValueError:
-        print("\n✖  Invalid option! Please Try Again.\n")
-        return print_confirm_download_menu()
+    while True:
+        print("\n".join(menu_options))
+        try:
+            return int(input("\nChoose an option: "))
+        except ValueError:
+            print("\n✖  Invalid option! Please Try Again.\n")
 
 
 def extract_id_from_url(url: str):
     pattern1 = r"twitch\.tv/(?:[^\/]+/)?(\d+)"
     pattern2 = r"twitch\.tv/.+?/video/(\d+)"
 
-    match = re.search(pattern1, url) or re.search(pattern2, url)
-    if match:
-        return match.group(1)
+    while True:
+        match = re.search(pattern1, url) or re.search(pattern2, url)
+        if match:
+            return match.group(1)
 
-    if CLI_MODE:
-        raise SystemExit("Error: Invalid Twitch VOD or Highlight URL.")
-    print("\n✖  Invalid Twitch VOD or Highlight URL! Please Try Again.\n")
-    url = print_get_twitch_url_menu()
-    return extract_id_from_url(url)
+        if CLI_MODE:
+            raise SystemExit("Error: Invalid Twitch VOD or Highlight URL.")
+        print("\n✖  Invalid Twitch VOD or Highlight URL! Please Try Again.\n")
+        url = print_get_twitch_url_menu()
+
+
+def make_m3u8_segments_absolute(m3u8_content, base_url):
+    """Replace relative segment references (e.g. '0.ts' or '0.mp4') with absolute URLs in one pass."""
+    return re.sub(r'\n(\d+\.(?:ts|mp4))', lambda m: f'\n{base_url}{m.group(1)}', m3u8_content)
 
 
 def generate_m3u8_from_segments(base_url, segment_duration=10.0):
+    chunk_ext = ".ts"
+
     def check_segment(n, retries=2):
         for attempt in range(retries):
             try:
-                url = f"{base_url}{n}.ts"
+                url = f"{base_url}{n}{chunk_ext}"
                 resp = requests.head(url, timeout=10)
                 return resp.status_code == 200
             except Exception:
@@ -4493,9 +4513,12 @@ def generate_m3u8_from_segments(base_url, segment_duration=10.0):
         return False
     
     if not check_segment(0):
-        return None
+        # Fallback: try .mp4 segments (some VODs use fragmented mp4)
+        chunk_ext = ".mp4"
+        if not check_segment(0):
+            return None
     
-    print("Segments accessible but playlist blocked. Generating m3u8...")
+    print(f"Segments accessible ({chunk_ext}) but playlist blocked. Generating m3u8...")
     
     low, high = 0, 100
     while check_segment(high):
@@ -4524,7 +4547,7 @@ def generate_m3u8_from_segments(base_url, segment_duration=10.0):
     
     for i in range(last_segment + 1):
         m3u8_lines.append(f"#EXTINF:{segment_duration},")
-        m3u8_lines.append(f"{i}.ts")
+        m3u8_lines.append(f"{i}{chunk_ext}")
     
     m3u8_lines.append("#EXT-X-ENDLIST")
     
@@ -4615,12 +4638,7 @@ def get_vod_or_highlight_url(vod_id):
                     if generated_m3u8:
                         broadcast_id = parse_video_id_from_m3u8_link(url)
                         temp_m3u8_path = os.path.join(get_default_directory(), f"vod_{broadcast_id}_generated.m3u8")
-                        absolute_m3u8 = generated_m3u8.replace("\n0.ts", f"\n{base_url}0.ts")
-                        for i in range(1, 100000):
-                            if f"\n{i}.ts" in absolute_m3u8:
-                                absolute_m3u8 = absolute_m3u8.replace(f"\n{i}.ts", f"\n{base_url}{i}.ts")
-                            else:
-                                break
+                        absolute_m3u8 = make_m3u8_segments_absolute(generated_m3u8, base_url)
                         with open(temp_m3u8_path, "w", encoding="utf-8") as f:
                             f.write(absolute_m3u8)
                         print(f"Generated m3u8 saved to: {temp_m3u8_path}")
