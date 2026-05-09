@@ -25,7 +25,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --noconsole vod_recovery.py
+          pyinstaller --onefile vod_recovery.py
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
